@@ -947,6 +947,87 @@ class Client extends EventEmitter {
 
         return new Message(this, newMessage);
     }
+
+    /**
+     * Send a Media to a specific chatId
+     * @param {string} filePath - File path of the large media file (80mb+)
+     * @param {string} chatId
+     * @param {MessageSendOptions} [options] - Options used when sending the message
+     * 
+     * @returns {Promise<Message>} Message that was just sent
+     */
+    async sendLargeMedia(filePath, chatId, options = {}) {
+        const fs = require('fs');
+        const mime = require('mime');
+        const path = require('path');
+    
+        let b64data = fs.readFileSync(filePath, { encoding: 'base64' });
+        const chunkSize = 1024 * 1024 * 79; // 0.5 MB chunks
+        const mimetype = mime.getType(filePath);
+        const filename = path.basename(filePath) || '';        
+        const chunksLocator = `mediaChunk_${chatId}_${(Math.random()*10e6).toFixed(0)}`;
+
+        await this.pupPage.evaluate(( chunksLocator) => {
+            if (!window.Store[chunksLocator]) {
+                window.Store[chunksLocator] = [];
+            }
+        }, chunksLocator);
+        const stream = fs.createReadStream(filePath, { encoding: 'base64', highWaterMark: 1024 * 1024 }); // 1MB chunks
+
+stream.on('data', async (chunk) => {
+  await this.pupPage.evaluate(( chunk, chunksLocator) => {
+    window.Store[chunksLocator] += chunk;
+  }, chunk, chunksLocator);
+});
+
+stream.on('error', (err) => {
+  console.error('Error reading file:', err);
+});
+
+stream.on('end', async() => {
+  console.log('File processing complete.');
+
+        b64data = ''; // Freeing up some memory first
+
+        let internalOptions = {
+            linkPreview: options.linkPreview === false ? undefined : true,
+            sendAudioAsVoice: options.sendAudioAsVoice,
+            sendVideoAsGif: options.sendVideoAsGif,
+            sendMediaAsSticker: options.sendMediaAsSticker,
+            sendMediaAsDocument: options.sendMediaAsDocument,
+            caption: options.caption,
+            quotedMessageId: options.quotedMessageId,
+            parseVCards: options.parseVCards !== false,
+            mentionedJidList: options.mentions || [],
+            groupMentions: options.groupMentions,
+            invokedBotWid: options.invokedBotWid,
+            extraOptions: options.extra
+        };
+
+        const sendSeen = typeof options.sendSeen === 'undefined' ? true : options.sendSeen;
+
+        let mediadata = { chunksLocator, mimetype, filename }
+        try {
+        const newMessage = await this.pupPage.evaluate(async (chatId, options, mediadata, sendSeen = true) => {
+            const chatWid = window.Store.WidFactory.createWid(chatId);
+            const chat = await window.Store.Chat.find(chatWid);
+
+            if (sendSeen) {
+                await window.WWebJS.sendSeen(chatId);
+            }
+            let finalOptions = options;
+            finalOptions.isViewOnce = options.isViewOnce;
+            console.log('Reached here');
+            const msg = await window.WWebJS.sendMessage(chat, '', options, sendSeen, mediadata);
+            return window.WWebJS.getMessageModel(msg);
+        }, chatId, internalOptions, mediadata, sendSeen);
+
+        return new Message(this, newMessage);
+        } catch(e) {
+            console.error(e);
+        }
+    });
+}
     
     /**
      * Searches for messages
